@@ -793,16 +793,21 @@ nav{flex:1;padding:4px 0}
   </div>
 </div>
 
-<!-- MODAL: Convidar / Editar Usuário -->
+<!-- MODAL: Cadastrar / Editar Usuário -->
 <div class="modal-bg" id="mUsuario" onclick="S.bgClose(event,'mUsuario')">
   <div class="modal">
-    <div class="modal-title" id="mUsuario-title">👤 Convidar usuário</div>
+    <div class="modal-title" id="mUsuario-title">👤 Cadastrar usuário</div>
     <div class="info-box teal" id="mUsuario-info">
-      O usuário receberá um e-mail com link para criar a própria senha.
+      O usuário poderá fazer login imediatamente com o e-mail e senha definidos aqui.
     </div>
     <div class="form-grid">
       <div class="form-row form-full"><label>Nome completo *</label><input id="usr-nome" placeholder="Nome do usuário"></div>
       <div class="form-row form-full"><label>E-mail *</label><input id="usr-email" type="email" placeholder="email@empresa.com"></div>
+      <div class="form-row form-full" id="usr-senha-row">
+        <label>Senha temporária *</label>
+        <input id="usr-senha" type="password" placeholder="Mínimo 6 caracteres">
+        <div style="font-size:11px;color:#aaa;margin-top:3px">O usuário pode trocar após o primeiro acesso</div>
+      </div>
       <div class="form-row"><label>Perfil de acesso *</label>
         <select id="usr-perfil" onchange="S.onUsuarioPerfilChange()">
           <option value="almoxarife">Almoxarife</option>
@@ -823,7 +828,7 @@ nav{flex:1;padding:4px 0}
     </div>
     <div class="modal-footer">
       <button class="btn-outline" onclick="S.closeModal('mUsuario')">Cancelar</button>
-      <button class="btn-primary" id="mUsuario-save" onclick="S.salvarUsuario()">Enviar convite</button>
+      <button class="btn-primary" id="mUsuario-save" onclick="S.salvarUsuario()">Criar usuário</button>
     </div>
   </div>
 </div>
@@ -2521,41 +2526,55 @@ const S = {
     };
     const desc=g('usr-perfil-desc');
     if(desc) desc.innerHTML=descs[p]||'';
-    // Se admin, esconde seleção de filial (admin acessa tudo)
     const filialRow=g('usr-filial-row');
     if(filialRow) filialRow.style.display=(p==='admin')?'none':'';
   },
 
   async salvarUsuario() {
-    const nome=val('usr-nome').trim(), email=val('usr-email').trim();
-    const perfil=val('usr-perfil'), filialId=val('usr-filial')||null;
+    const nome=val('usr-nome').trim();
+    const email=val('usr-email').trim();
+    const senha=val('usr-senha').trim();
+    const perfil=val('usr-perfil');
+    const filialId=val('usr-filial')||null;
+
     if(!nome||!email) return alert('Informe nome e e-mail.');
     if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return alert('E-mail inválido.');
+    if(!senha||senha.length<6) return alert('A senha deve ter pelo menos 6 caracteres.');
 
     const btn=g('mUsuario-save');
-    btn.textContent='Enviando...'; btn.disabled=true;
+    btn.textContent='Criando...'; btn.disabled=true;
 
     try {
-      // 1. Registra o convite pendente no banco
-      const { error: errConv } = await supa.from('convites_pendentes').insert({
-        empresa_id: empresaId,
-        filial_id: filialId||null,
-        nome, email, perfil
-      });
-      if(errConv) throw errConv;
+      // Pega o token do usuário logado para autenticar na Edge Function
+      const { data: { session } } = await supa.auth.getSession();
 
-      // 2. Envia o convite via Supabase Auth (e-mail com link de acesso)
-      const { error: errInv } = await supa.auth.admin?.inviteUserByEmail?.(email) || {error:null};
-      // Se não tiver permissão de admin no client, usa a função do banco
-      if(errInv) console.warn('Invite via API falhou, convite salvo no banco:', errInv);
+      const resp = await fetch(
+        `${SUPA_URL}/functions/v1/cadastrar-usuario`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+            'apikey': SUPA_KEY
+          },
+          body: JSON.stringify({ nome, email, senha, perfilNovo: perfil, filialId })
+        }
+      );
 
-      alert(`✅ Convite registrado para ${email}!\n\nVá em Authentication → Users no Supabase e clique em "Invite user" digitando o e-mail ${email} para enviar o link de acesso.`);
+      const resultado = await resp.json();
+
+      if(!resp.ok || resultado.error) {
+        throw new Error(resultado.error || 'Erro desconhecido');
+      }
+
+      alert(`✅ ${resultado.message}`);
       this.closeModal('mUsuario');
       this.renderUsuarios();
+
     } catch(err) {
-      alert('Erro ao registrar convite: ' + (err.message||err));
+      alert('Erro ao criar usuário: ' + (err.message||err));
     } finally {
-      btn.textContent='Enviar convite'; btn.disabled=false;
+      btn.textContent='Criar usuário'; btn.disabled=false;
     }
   },
 
@@ -2564,11 +2583,16 @@ const S = {
     g('mUsuario-info').textContent='Altere o perfil ou a filial de acesso do usuário.';
     g('mUsuario-save').textContent='Salvar alterações';
     g('mUsuario-save').onclick=()=>S._salvarEdicaoUsuario(id);
+    // Esconde campo de senha na edição
+    const senhaRow=g('usr-senha-row');
+    if(senhaRow) senhaRow.style.display='none';
     setVal('usr-nome', nome);
     g('usr-email').disabled=true;
-    setVal('usr-email', '(não alterável)');
+    setVal('usr-email','(não alterável)');
     setVal('usr-perfil', perfilAtualU);
-    setVal('usr-filial', filialId||'');
+    // Preenche filiais
+    g('usr-filial').innerHTML='<option value="">Todas as filiais</option>'+
+      db.empresas.map(e=>`<option value="${e.uuid}"${e.uuid===filialId?' selected':''}>${e.nome}</option>`).join('');
     this.onUsuarioPerfilChange();
     this.openModal('mUsuario');
   },
@@ -3197,15 +3221,15 @@ const S = {
       if(nfEditId===null){nfItemRows=[];setVal('nf-tipo','estoque');this.onNfTipoChange();this._renderNfItemRows();g('nf-modal-title').textContent='🧾 Registrar Nota Fiscal de entrada';['nf-num','nf-forn','nf-chave','nf-obs','nf-manut-medidor','nf-manut-proxima','nf-manut-desc'].forEach(x=>setVal(x,''));setVal('nf-emissao',hoje);setVal('nf-entrada',hoje);setVal('nf-manut-custo','0');setVal('nf-manut-tipo','Corretiva');}
     }
     if(id==='mUsuario'){
-      // Reseta form para novo convite
-      g('mUsuario-title').textContent='👤 Convidar usuário';
-      g('mUsuario-info').textContent='O usuário receberá um e-mail com link para criar a própria senha.';
-      g('mUsuario-save').textContent='Enviar convite';
+      g('mUsuario-title').textContent='👤 Cadastrar usuário';
+      g('mUsuario-info').textContent='O usuário poderá fazer login imediatamente com o e-mail e senha definidos aqui.';
+      g('mUsuario-save').textContent='Criar usuário';
       g('mUsuario-save').onclick=()=>S.salvarUsuario();
       g('usr-email').disabled=false;
-      ['usr-nome','usr-email'].forEach(x=>setVal(x,''));
+      ['usr-nome','usr-email','usr-senha'].forEach(x=>setVal(x,''));
       setVal('usr-perfil','almoxarife');
-      // Preenche select de filiais
+      const senhaRow=g('usr-senha-row');
+      if(senhaRow) senhaRow.style.display='';
       g('usr-filial').innerHTML='<option value="">Todas as filiais</option>'+
         db.empresas.map(e=>`<option value="${e.uuid}">${e.nome}</option>`).join('');
       this.onUsuarioPerfilChange();
